@@ -58,7 +58,7 @@ LMDBBackend::LMDBBackend(const std::string& suffix)
     d_asyncFlag = MDB_NOMETASYNC;
   else if(syncMode == "mapasync")
     d_asyncFlag = MDB_MAPASYNC;
-  else if(syncMode.empty())
+  else if(syncMode.empty() || syncMode == "sync")
     d_asyncFlag = 0;
   else
     throw std::runtime_error("Unknown sync mode "+syncMode+" requested for LMDB backend");
@@ -224,10 +224,10 @@ std::shared_ptr<DNSRecordContent> unserializeContentZR(uint16_t qtype, const DNS
    Note - domain_id, name and type are ONLY present on the index!
 */
 
-#if BOOST_VERSION <= 105400
-#define StringView string
-#else
+#if BOOST_VERSION >= 106100
 #define StringView string_view
+#else
+#define StringView string
 #endif
 
 void LMDBBackend::deleteDomainRecords(RecordsRWTransaction& txn, uint32_t domain_id, uint16_t qtype)
@@ -397,8 +397,10 @@ bool LMDBBackend::replaceRRSet(uint32_t domain_id, const DNSName& qname, const Q
   }
 
   DomainInfo di;
-  d_tdomains->getROTransaction().get(domain_id, di); // XX error checking
-  
+  if (!d_tdomains->getROTransaction().get(domain_id, di)) {
+    return false;
+  }
+
   compoundOrdername co;
   auto cursor = txn->txn.getCursor(txn->db->dbi);
   MDBOutVal key, val;
@@ -616,8 +618,9 @@ bool LMDBBackend::get(DNSResourceRecord& rr)
   rr.qname = dzr.dr.d_name;
   rr.ttl = dzr.dr.d_ttl;
   rr.qtype =dzr.dr.d_type;
-  rr.content = dzr.dr.d_content->getZoneRepresentation();
+  rr.content = dzr.dr.d_content->getZoneRepresentation(true);
   rr.domain_id = dzr.domain_id;
+  rr.auth = dzr.auth;
   //  cout<<"old school called for "<<rr.qname<<", "<<rr.qtype.getName()<<endl;
   return true;
 }
@@ -808,7 +811,7 @@ bool LMDBBackend::setMaster(const DNSName &domain, const std::string& ips)
   vector<string> parts;
   stringtok(parts, ips, " \t;,");
   for(const auto& ip : parts) 
-    masters.push_back(ComboAddress(ip)); 
+    masters.push_back(ComboAddress(ip, 53));
   
   return genChangeDomain(domain, [&masters](DomainInfo& di) {
       di.masters = masters;
@@ -858,8 +861,17 @@ void LMDBBackend::getAllDomains(vector<DomainInfo> *domains, bool include_disabl
 
     auto txn = getRecordsROTransaction(iter.getID());
     if(!txn->txn.get(txn->db->dbi, co(di.id, g_rootdnsname, QType::SOA), val)) {
-      domains->push_back(di);
+      DNSResourceRecord rr;
+      serFromString(val.get<string_view>(), rr);
+
+      if(rr.content.size() >= 5 * sizeof(uint32_t)) {
+        uint32_t serial = *reinterpret_cast<uint32_t*>(&rr.content[rr.content.size() - (5 * sizeof(uint32_t))]);
+        di.serial = ntohl(serial);
+      }
+    } else if(!include_disabled) {
+      continue;
     }
+    domains->push_back(di);
   }
 }
 
@@ -1582,8 +1594,9 @@ public:
   void declareArguments(const string &suffix="")
   {
     declare(suffix,"filename","Filename for lmdb","./pdns.lmdb");
-    declare(suffix,"sync-mode","Synchronisation mode: nosync, nometasync, mapasync","mapasync");
-    declare(suffix,"shards","Records database will be split into this number of shards","64");
+    declare(suffix,"sync-mode","Synchronisation mode: nosync, nometasync, mapasync, sync","mapasync");
+    // there just is no room for more on 32 bit
+    declare(suffix,"shards","Records database will be split into this number of shards", (sizeof(long) == 4) ? "2" : "64"); 
   }
   DNSBackend *make(const string &suffix="")
   {

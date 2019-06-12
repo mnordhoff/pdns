@@ -72,6 +72,7 @@ AuthWebServer::AuthWebServer() :
     d_ws = new WebServer(arg()["webserver-address"], arg().asNum("webserver-port"));
     d_ws->setApiKey(arg()["api-key"]);
     d_ws->setPassword(arg()["webserver-password"]);
+    d_ws->setLogLevel(arg()["webserver-loglevel"]);
 
     NetmaskGroup acl;
     acl.toMasks(::arg()["webserver-allow-from"]);
@@ -282,9 +283,10 @@ void AuthWebServer::indexfunction(HttpRequest* req, HttpResponse* resp)
 
   ret<<"Total queries: "<<S.read("udp-queries")<<". Question/answer latency: "<<S.read("latency")/1000.0<<"ms</p><br>"<<endl;
   if(req->getvars["ring"].empty()) {
-    vector<string>entries=S.listRings();
-    for(vector<string>::const_iterator i=entries.begin();i!=entries.end();++i)
-      printtable(ret,*i,S.getRingTitle(*i));
+    auto entries = S.listRings();
+    for(const auto &i: entries) {
+      printtable(ret, i, S.getRingTitle(i));
+    }
 
     printvars(ret);
     if(arg().mustDo("webserver-print-arguments"))
@@ -520,7 +522,7 @@ static void validateGatheredRRType(const DNSResourceRecord& rr) {
   }
 }
 
-static void gatherRecords(const Json container, const DNSName& qname, const QType qtype, const int ttl, vector<DNSResourceRecord>& new_records, vector<DNSResourceRecord>& new_ptrs) {
+static void gatherRecords(const string& logprefix, const Json container, const DNSName& qname, const QType qtype, const int ttl, vector<DNSResourceRecord>& new_records, vector<DNSResourceRecord>& new_ptrs) {
   UeberBackend B;
   DNSResourceRecord rr;
   rr.qname = qname;
@@ -556,6 +558,9 @@ static void gatherRecords(const Json container, const DNSName& qname, const QTyp
 
     if ((rr.qtype.getCode() == QType::A || rr.qtype.getCode() == QType::AAAA) &&
         boolFromJson(record, "set-ptr", false) == true) {
+
+      g_log<<Logger::Warning<<logprefix<<"API call uses deprecated set-ptr feature, please remove it"<<endl;
+
       DNSResourceRecord ptr;
       makePtr(rr, &ptr);
 
@@ -613,13 +618,18 @@ static void throwUnableToSecure(const DNSName& zonename) {
       + "capable backends are loaded, or because the backends have DNSSEC disabled. Check your configuration.");
 }
 
-static void updateDomainSettingsFromDocument(UeberBackend& B, const DomainInfo& di, const DNSName& zonename, const Json document) {
+static void updateDomainSettingsFromDocument(UeberBackend& B, const DomainInfo& di, const DNSName& zonename, const Json document, bool rectifyTransaction=true) {
   vector<string> zonemaster;
   bool shouldRectify = false;
   for(auto value : document["masters"].array_items()) {
     string master = value.string_value();
     if (master.empty())
       throw ApiException("Master can not be an empty string");
+    try {
+      ComboAddress m(master);
+    } catch (const PDNSException &e) {
+      throw ApiException("Master (" + master + ") is not an IP address: " + e.reason);
+    }
     zonemaster.push_back(master);
   }
 
@@ -733,7 +743,7 @@ static void updateDomainSettingsFromDocument(UeberBackend& B, const DomainInfo& 
     if (api_rectify == "1") {
       string info;
       string error_msg;
-      if (!dk.rectifyZone(zonename, error_msg, info, true)) {
+      if (!dk.rectifyZone(zonename, error_msg, info, rectifyTransaction)) {
         throw ApiException("Failed to rectify '" + zonename.toString() + "' " + error_msg);
       }
     }
@@ -1545,7 +1555,7 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
         }
         if (rrset["records"].is_array()) {
           int ttl = intFromJson(rrset, "ttl");
-          gatherRecords(rrset, qname, qtype, ttl, new_records, new_ptrs);
+          gatherRecords(req->logprefix, rrset, qname, qtype, ttl, new_records, new_ptrs);
         }
         if (rrset["comments"].is_array()) {
           gatherComments(rrset, qname, qtype, new_comments);
@@ -1632,12 +1642,12 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
     if(!B.getDomainInfo(zonename, di))
       throw ApiException("Creating domain '"+zonename.toString()+"' failed: lookup of domain ID failed");
 
+    di.backend->startTransaction(zonename, di.id);
+
     // updateDomainSettingsFromDocument does NOT fill out the default we've established above.
     if (!soa_edit_api_kind.empty()) {
       di.backend->setDomainMetadataOne(zonename, "SOA-EDIT-API", soa_edit_api_kind);
     }
-
-    di.backend->startTransaction(zonename, di.id);
 
     for(auto rr : new_records) {
       rr.domain_id = di.id;
@@ -1648,7 +1658,7 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
       di.backend->feedComment(c);
     }
 
-    updateDomainSettingsFromDocument(B, di, zonename, document);
+    updateDomainSettingsFromDocument(B, di, zonename, document, false);
 
     di.backend->commitTransaction();
 
@@ -1674,7 +1684,11 @@ static void apiServerZones(HttpRequest* req, HttpResponse* resp) {
       domains.push_back(di);
     }
   } else {
-    B.getAllDomains(&domains, true); // incl. disabled
+    try {
+      B.getAllDomains(&domains, true); // incl. disabled
+    } catch(const PDNSException &e) {
+      throw HttpInternalServerErrorException("Could not retrieve all domain information: " + e.reason);
+    }
   }
 
   Json::array doc;
@@ -1689,14 +1703,20 @@ static void apiServerZoneDetail(HttpRequest* req, HttpResponse* resp) {
 
   UeberBackend B;
   DomainInfo di;
-  if (!B.getDomainInfo(zonename, di)) {
-    throw HttpNotFoundException();
+  try {
+    if (!B.getDomainInfo(zonename, di)) {
+      throw HttpNotFoundException();
+    }
+  } catch(const PDNSException &e) {
+    throw HttpInternalServerErrorException("Could not retrieve Domain Info: " + e.reason);
   }
 
   if(req->method == "PUT") {
     // update domain settings
 
-    updateDomainSettingsFromDocument(B, di, zonename, req->json());
+    di.backend->startTransaction(zonename, -1);
+    updateDomainSettingsFromDocument(B, di, zonename, req->json(), false);
+    di.backend->commitTransaction();
 
     resp->body = "";
     resp->status = 204; // No Content, but indicate success
@@ -1706,6 +1726,11 @@ static void apiServerZoneDetail(HttpRequest* req, HttpResponse* resp) {
     // delete domain
     if(!di.backend->deleteDomain(zonename))
       throw ApiException("Deleting domain '"+zonename.toString()+"' failed: backend delete failed/unsupported");
+
+    // clear caches
+    DNSSECKeeper dk(&B);
+    dk.clearCaches(zonename);
+    purgeAuthCaches(zonename.toString() + "$");
 
     // empty body on success
     resp->body = "";
@@ -1963,7 +1988,7 @@ static void patchZone(HttpRequest* req, HttpResponse* resp) {
           // ttl shouldn't be part of DELETE, and it shouldn't be required if we don't get new records.
           int ttl = intFromJson(rrset, "ttl");
           // new_ptrs is merged.
-          gatherRecords(rrset, qname, qtype, ttl, new_records, new_ptrs);
+          gatherRecords(req->logprefix, rrset, qname, qtype, ttl, new_records, new_ptrs);
 
           for(DNSResourceRecord& rr : new_records) {
             rr.domain_id = di.id;
@@ -1987,8 +2012,10 @@ static void patchZone(HttpRequest* req, HttpResponse* resp) {
           di.backend->lookup(QType(QType::ANY), qname);
           DNSResourceRecord rr;
           while (di.backend->get(rr)) {
-            if (qtype.getCode() == 0) {
+            if (rr.qtype.getCode() == QType::ENT) {
               ent_present = true;
+              /* that's fine, we will override it */
+              continue;
             }
             if (qtype.getCode() != rr.qtype.getCode()
               && (exclusiveEntryTypes.count(qtype.getCode()) != 0

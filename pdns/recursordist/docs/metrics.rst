@@ -185,6 +185,10 @@ concurrent-queries
 ^^^^^^^^^^^^^^^^^^
 shows the number of MThreads currently   running
 
+cpu-msec-thread-n
+^^^^^^^^^^^^^^^^^
+shows the number of milliseconds spent in thread n. Available since 4.1.12.
+
 dlg-only-drops
 ^^^^^^^^^^^^^^
 number of records dropped because of :ref:`setting-delegation-only` setting
@@ -398,6 +402,12 @@ questions dropped because the query distribution pipe was full
 questions
 ^^^^^^^^^
 counts all end-user initiated queries with the RD bit   set
+
+rebalanced-queries
+^^^^^^^^^^^^^^^^^^
+.. versionadded:: 4.1.12
+
+number of queries balanced to a different worker thread because the first selected one was above the target load configured with 'distribution-load-factor'
 
 resource-limits
 ^^^^^^^^^^^^^^^

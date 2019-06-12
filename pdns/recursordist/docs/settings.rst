@@ -257,6 +257,40 @@ Operate in the background.
 
 Which domains we only accept delegations from (a Verisign special).
 
+.. _setting-dont-throttle-names:
+
+``dont-throttle-names``
+----------------------------
+.. versionadded:: 4.2.0
+
+-  Comma separated list of domain-names
+-  Default: (empty)
+
+When an authoritative server does not answer a query or sends a reply the recursor does not like, it is throttled.
+Any servers' name suffix-matching the supplied names will never be throttled.
+
+.. warning::
+  Most servers on the internet do not respond for a good reason (overloaded or unreachable), ``dont-throttle-names`` could make this load on the upstream server even higher, resulting in further service degradation.
+
+.. _setting-dont-throttle-netmasks:
+
+``dont-throttle-netmasks``
+----------------------------
+.. versionadded:: 4.2.0
+
+-  Comma separated list of netmasks
+-  Default: (empty)
+
+When an authoritative server does not answer a query or sends a reply the recursor does not like, it is throttled.
+Any servers matching the supplied netmasks will never be throttled.
+
+This can come in handy on lossy networks when forwarding, where the same server is configured multiple times (e.g. with ``forward-zones-recurse=example.com=192.0.2.1;192.0.2.1``).
+By default, the PowerDNS Recursor would throttle the "first" server on a timeout and hence not retry the "second" one.
+In this case, ``dont-throttle-netmasks`` could be set to ``192.0.2.1``.
+
+.. warning::
+  Most servers on the internet do not respond for a good reason (overloaded or unreachable), ``dont-throttle-netmasks`` could make this load on the upstream server even higher, resulting in further service degradation.
+
 .. _setting-disable-packetcache:
 
 ``disable-packetcache``
@@ -277,6 +311,40 @@ not be cached.
 Do not log to syslog, only to stdout.
 Use this setting when running inside a supervisor that handles logging (like systemd).
 **Note**: do not use this setting in combination with `daemon`_ as all logging will disappear.
+
+.. _setting-distribution-load-factor:
+
+``distribution-load-factor``
+----------------------------
+.. versionadded:: 4.1.12
+
+-  Double
+-  Default: 0.0
+
+If `pdns-distributes-queries`_ is set and this setting is set to another value
+than 0, the distributor thread will use a bounded load-balancing algorithm while
+distributing queries to worker threads, making sure that no thread is assigned
+more queries than distribution-load-factor times the average number of queries
+currently processed by all the workers.
+For example, with a value of 1.25, no server should get more than 125 % of the
+average load. This helps making sure that all the workers have roughly the same
+share of queries, even if the incoming traffic is very skewed, with a larger
+number of requests asking for the same qname.
+
+.. _setting-distribution-pipe-buffer-size:
+
+``distribution-pipe-buffer-size``
+---------------------------------
+.. versionadded:: 4.2.0
+
+-  Integer
+-  Default: 0
+
+Size in bytes of the internal buffer of the pipe used by the distributor to pass incoming queries to a worker thread.
+Requires support for `F_SETPIPE_SZ` which is present in Linux since 2.6.35. The actual size might be rounded up to
+a multiple of a page size. 0 means that the OS default size is used.
+A large buffer might allow the recursor to deal with very short-lived load spikes during which a worker thread gets
+overloaded, but it will be at the cost of an increased latency.
 
 .. _setting-distributor-threads:
 
@@ -377,6 +445,18 @@ This defaults to not using the requestor address inside RFC1918 and similar "pri
 
 Number of bits of client IPv4 address to pass when sending EDNS Client Subnet address information.
 
+.. _setting-ecs-ipv4-cache-bits:
+
+``ecs-ipv4-cache-bits``
+-----------------
+.. versionadded:: 4.1.12
+
+-  Integer
+-  Default: 24
+
+Maximum number of bits of client IPv4 address used by the authoritative server (as indicated by the EDNS Client Subnet scope in the answer) for an answer to be inserted into the query cache. This condition applies in conjunction with ``ecs-cache-limit-ttl``.
+That is, only if both the limits apply, the record will not be cached.
+
 .. _setting-ecs-ipv6-bits:
 
 ``ecs-ipv6-bits``
@@ -387,6 +467,41 @@ Number of bits of client IPv4 address to pass when sending EDNS Client Subnet ad
 -  Default: 56
 
 Number of bits of client IPv6 address to pass when sending EDNS Client Subnet address information.
+
+.. _setting-ecs-ipv6-cache-bits:
+
+``ecs-ipv6-cache-bits``
+-----------------
+.. versionadded:: 4.1.12
+
+-  Integer
+-  Default: 56
+
+Maximum number of bits of client IPv6 address used by the authoritative server (as indicated by the EDNS Client Subnet scope in the answer) for an answer to be inserted into the query cache. This condition applies in conjunction with ``ecs-cache-limit-ttl``.
+That is, only if both the limits apply, the record will not be cached.
+
+.. _setting-ecs-minimum-ttl-override:
+
+``ecs-minimum-ttl-override``
+----------------------------
+-  Integer
+-  Default: 0 (disabled)
+
+This setting artificially raises the TTLs of records in the ANSWER section of ECS-specific answers to be at least this long.
+While this is a gross hack, and violates RFCs, under conditions of DoS, it may enable you to continue serving your customers.
+Can be set at runtime using ``rec_control set-ecs-minimum-ttl 3600``.
+
+.. _setting-ecs-cache-limit-ttl:
+
+``ecs-cache-limit-ttl``
+-----------------------
+.. versionadded:: 4.1.12
+
+-  Integer
+-  Default: 0 (disabled)
+
+The minimum TTL for an ECS-specific answer to be inserted into the query cache. This condition applies in conjunction with ``ecs-ipv4-cache-bits`` or ``ecs-ipv6-cache-bits``.
+That is, only if both the limits apply, the record will not be cached.
 
 .. _setting-ecs-scope-zero-address:
 
@@ -1027,6 +1142,17 @@ maximizing the cache hit ratio. Starting with version 4.2.0, more than one distr
 setting.
 Improves performance on Linux.
 
+.. _settting-protobuf-use-kernel-timestamp:
+
+``protobuf-use-kernel-timestamp``
+---------------------------
+.. versionadded:: 4.2.0
+
+- Boolean
+- Default: false
+
+Whether to compute the latency of responses in protobuf messages using the timestamp set by the kernel when the query packet was received (when available), instead of computing it based on the moment we start processing the query.
+
 .. _settting-public-suffix-list-file:
 
 ``public-suffix-list-file``
@@ -1558,6 +1684,47 @@ IP address for the webserver to listen on.
 
 These subnets are allowed to access the webserver.
 
+.. _setting-webserver-loglevel:
+
+``webserver-loglevel``
+----------------------
+.. versionadded:: 4.2.0
+
+-  String, one of "none", "normal", "detailed"
+
+The amount of logging the webserver must do. "none" means no useful webserver information will be logged.
+When set to "normal", the webserver will log a line per request that should be familiar::
+
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e 127.0.0.1:55376 "GET /api/v1/servers/localhost/bla HTTP/1.1" 404 196
+
+When set to "detailed", all information about the request and response are logged::
+
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e Request Details:
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e  Headers:
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   accept-encoding: gzip, deflate
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   accept-language: en-US,en;q=0.5
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   connection: keep-alive
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   dnt: 1
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   host: 127.0.0.1:8081
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   upgrade-insecure-requests: 1
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   user-agent: Mozilla/5.0 (X11; Linux x86_64; rv:64.0) Gecko/20100101 Firefox/64.0
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e  No body
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e Response details:
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e  Headers:
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   Connection: close
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   Content-Length: 49
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   Content-Type: text/html; charset=utf-8
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   Server: PowerDNS/0.0.15896.0.gaba8bab3ab
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e  Full body: 
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e   <!html><title>Not Found</title><h1>Not Found</h1>
+  [webserver] e235780e-a5cf-415e-9326-9d33383e739e 127.0.0.1:55376 "GET /api/v1/servers/localhost/bla HTTP/1.1" 404 196
+
+The value between the hooks is a UUID that is generated for each request. This can be used to find all lines related to a single request.
+
+.. note::
+  The webserver logs these line on the NOTICE level. The :ref:`settings-loglevel` seting must be 5 or higher for these lines to end up in the log.
+
 .. _setting-webserver-password:
 
 ``webserver-password``
@@ -1600,7 +1767,7 @@ If a PID file should be written to `socket-dir`_
 The server will trust XPF records found in queries sent from those netmasks (both IPv4 and IPv6),
 and will adjust queries' source and destination accordingly. This is especially useful when the recursor
 is placed behind a proxy like `dnsdist <https://dnsdist.org>`_.
-Note that the ref:`setting-allow-from` setting is still applied to the original source address, and thus access restriction
+Note that the :ref:`setting-allow-from` setting is still applied to the original source address, and thus access restriction
 should be done on the proxy.
 
 .. _setting-xpf-rr-code:

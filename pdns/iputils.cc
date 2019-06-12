@@ -47,7 +47,7 @@ int SSocket(int family, int type, int flags)
 
 int SConnect(int sockfd, const ComboAddress& remote)
 {
-  int ret = connect(sockfd, (struct sockaddr*)&remote, remote.getSocklen());
+  int ret = connect(sockfd, reinterpret_cast<const struct sockaddr*>(&remote), remote.getSocklen());
   if(ret < 0) {
     int savederrno = errno;
     RuntimeError(boost::format("connecting socket to %s: %s") % remote.toStringWithPort() % strerror(savederrno));
@@ -57,12 +57,12 @@ int SConnect(int sockfd, const ComboAddress& remote)
 
 int SConnectWithTimeout(int sockfd, const ComboAddress& remote, int timeout)
 {
-  int ret = connect(sockfd, (struct sockaddr*)&remote, remote.getSocklen());
+  int ret = connect(sockfd, reinterpret_cast<const struct sockaddr*>(&remote), remote.getSocklen());
   if(ret < 0) {
     int savederrno = errno;
     if (savederrno == EINPROGRESS) {
       if (timeout <= 0) {
-        return ret;
+        return savederrno;
       }
 
       /* we wait until the connection has been established */
@@ -97,7 +97,7 @@ int SConnectWithTimeout(int sockfd, const ComboAddress& remote, int timeout)
     }
   }
 
-  return ret;
+  return 0;
 }
 
 int SBind(int sockfd, const ComboAddress& local)
@@ -136,6 +136,27 @@ int SSetsockopt(int sockfd, int level, int opname, int value)
   return ret;
 }
 
+void setSocketIgnorePMTU(int sockfd)
+{
+#if defined(IP_MTU_DISCOVER) && defined(IP_PMTUDISC_DONT)
+#ifdef IP_PMTUDISC_OMIT
+  /* Linux 3.15+ has IP_PMTUDISC_OMIT, which discards PMTU information to prevent
+     poisoning, but still allows fragmentation if the packet size exceeds the
+     outgoing interface MTU, which is good.
+  */
+  try {
+    SSetsockopt(sockfd, IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_OMIT);
+    return;
+  }
+  catch(const std::exception& e) {
+    /* failed, let's try IP_PMTUDISC_DONT instead */
+  }
+#endif /* IP_PMTUDISC_OMIT */
+
+  /* IP_PMTUDISC_DONT disables Path MTU discovery */
+  SSetsockopt(sockfd, IPPROTO_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DONT);
+#endif /* defined(IP_MTU_DISCOVER) && defined(IP_PMTUDISC_DONT) */
+}
 
 bool HarvestTimestamp(struct msghdr* msgh, struct timeval* tv) 
 {
@@ -269,60 +290,11 @@ void ComboAddress::truncate(unsigned int bits) noexcept
   *place &= (~((1<<bitsleft)-1));
 }
 
-ssize_t sendMsgWithTimeout(int fd, const char* buffer, size_t len, int timeout, ComboAddress& dest, const ComboAddress& local, unsigned int localItf)
+size_t sendMsgWithOptions(int fd, const char* buffer, size_t len, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int flags)
 {
   struct msghdr msgh;
   struct iovec iov;
   char cbuf[256];
-  bool firstTry = true;
-  fillMSGHdr(&msgh, &iov, cbuf, sizeof(cbuf), const_cast<char*>(buffer), len, &dest);
-  addCMsgSrcAddr(&msgh, cbuf, &local, localItf);
-
-  do {
-    ssize_t written = sendmsg(fd, &msgh, 0);
-
-    if (written > 0)
-      return written;
-
-    if (errno == EAGAIN) {
-      if (firstTry) {
-        int res = waitForRWData(fd, false, timeout, 0);
-        if (res > 0) {
-          /* there is room available */
-          firstTry = false;
-        }
-        else if (res == 0) {
-          throw runtime_error("Timeout while waiting to write data");
-        } else {
-          throw runtime_error("Error while waiting for room to write data");
-        }
-      }
-      else {
-        throw runtime_error("Timeout while waiting to write data");
-      }
-    }
-    else {
-      unixDie("failed in write2WithTimeout");
-    }
-  }
-  while (firstTry);
-
-  return 0;
-}
-
-template class NetmaskTree<bool>;
-
-bool sendSizeAndMsgWithTimeout(int sock, uint16_t bufferLen, const char* buffer, int idleTimeout, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int totalTimeout, int flags)
-{
-  uint16_t size = htons(bufferLen);
-  char cbuf[256];
-  struct msghdr msgh;
-  struct iovec iov[2];
-  int remainingTime = totalTimeout;
-  time_t start = 0;
-  if (totalTimeout) {
-    start = time(NULL);
-  }
 
   /* Set up iov and msgh structures. */
   memset(&msgh, 0, sizeof(struct msghdr));
@@ -343,77 +315,62 @@ bool sendSizeAndMsgWithTimeout(int sock, uint16_t bufferLen, const char* buffer,
     addCMsgSrcAddr(&msgh, cbuf, local, localItf);
   }
 
-  iov[0].iov_base = &size;
-  iov[0].iov_len = sizeof(size);
-  iov[1].iov_base = reinterpret_cast<void*>(const_cast<char*>(buffer));
-  iov[1].iov_len = bufferLen;
+  iov.iov_base = reinterpret_cast<void*>(const_cast<char*>(buffer));
+  iov.iov_len = len;
+  msgh.msg_iov = &iov;
+  msgh.msg_iovlen = 1;
+  msgh.msg_flags = 0;
 
-  size_t pos = 0;
   size_t sent = 0;
-  size_t nbElements = sizeof(iov)/sizeof(*iov);
-  while (true) {
-    msgh.msg_iov = &iov[pos];
-    msgh.msg_iovlen = nbElements - pos;
+  bool firstTry = true;
 
-    ssize_t res = sendmsg(sock, &msgh, flags);
+  do {
+
+#ifdef MSG_FASTOPEN
+    if (flags & MSG_FASTOPEN && firstTry == false) {
+      flags &= ~MSG_FASTOPEN;
+    }
+#endif /* MSG_FASTOPEN */
+
+    ssize_t res = sendmsg(fd, &msgh, flags);
+
     if (res > 0) {
       size_t written = static_cast<size_t>(res);
       sent += written;
 
-      if (sent == (sizeof(size) + bufferLen)) {
-        return true;
+      if (sent == len) {
+        return sent;
       }
-      /* partial write, we need to keep only the (parts of) elements
-         that have not been written.
-      */
-      do {
-        if (written < iov[pos].iov_len) {
-          iov[pos].iov_len -= written;
-          iov[pos].iov_base = reinterpret_cast<void*>(reinterpret_cast<char*>(iov[pos].iov_base) + written);
-          written = 0;
-        }
-        else {
-          written -= iov[pos].iov_len;
-          iov[pos].iov_len = 0;
-          pos++;
-        }
-      }
-      while (written > 0 && pos < nbElements);
+
+      /* partial write */
+      firstTry = false;
+      iov.iov_len -= written;
+      iov.iov_base = reinterpret_cast<void*>(reinterpret_cast<char*>(iov.iov_base) + written);
+      written = 0;
+    }
+    else if (res == 0) {
+      return res;
     }
     else if (res == -1) {
       if (errno == EINTR) {
         continue;
       }
-      else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS) {
+      else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS || errno == ENOTCONN) {
         /* EINPROGRESS might happen with non blocking socket,
            especially with TCP Fast Open */
-        int ret = waitForRWData(sock, false, (totalTimeout == 0 || idleTimeout <= remainingTime) ? idleTimeout : remainingTime, 0);
-        if (ret > 0) {
-          /* there is room available */
-        }
-        else if (ret == 0) {
-          throw runtime_error("Timeout while waiting to send data");
-        } else {
-          throw runtime_error("Error while waiting for room to send data");
-        }
+        return sent;
       }
       else {
-        unixDie("failed in sendSizeAndMsgWithTimeout");
+        unixDie("failed in sendMsgWithTimeout");
       }
-    }
-    if (totalTimeout) {
-      time_t now = time(NULL);
-      int elapsed = now - start;
-      if (elapsed >= remainingTime) {
-        throw runtime_error("Timeout while sending data");
-      }
-      start = now;
-      remainingTime -= elapsed;
     }
   }
+  while (true);
 
-  return false;
+  return 0;
 }
+
+template class NetmaskTree<bool>;
 
 /* requires a non-blocking socket.
    On Linux, we could use MSG_DONTWAIT on a blocking socket

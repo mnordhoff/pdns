@@ -82,16 +82,9 @@ AC_DEFUN([PDNS_SELECT_CONTEXT_IMPL], [
 
 PDNS_CHECK_CLOCK_GETTIME
 
-boost_required_version=1.35
-
 PDNS_WITH_PROTOBUF
-AS_IF([test "x$PROTOBUF_LIBS" != "x" -a x"$PROTOC" != "x"],
-  # The protobuf code needs boost::uuid, which is available from 1.42 onward
-  [AC_MSG_WARN([Bumping minimal Boost requirement to 1.42. To keep the requirement at 1.35, disable protobuf support])
-  boost_required_version=1.42]
-)
 
-BOOST_REQUIRE([$boost_required_version])
+BOOST_REQUIRE([1.42])
 
 # Check against flat_set header that requires boost >= 1.48
 BOOST_FIND_HEADER([boost/container/flat_set.hpp], [AC_MSG_NOTICE([boost::container::flat_set not available, will fallback to std::set])])
@@ -155,6 +148,8 @@ AC_ARG_WITH([nod-cache-dir],
   [AS_HELP_STRING([--with-nodcachedir], [where newly observed domain cache files live @<:@default=LOCALSTATEDIR/lib/pdns-recursor@:>@])],
   [nodcachedir="$withval"]
 )
+
+PDNS_CHECK_DNSTAP
 
 AC_MSG_CHECKING([whether we will enable compiler security checks])
 AC_ARG_ENABLE([hardening],
@@ -251,6 +246,10 @@ AS_IF([test "x$systemd" != "xn"],
 AM_COND_IF([NOD_ENABLED],
   [AC_MSG_NOTICE([nod: yes])],
   [AC_MSG_NOTICE([nod: no])]
+)
+AM_COND_IF([FSTRM],
+  [AC_MSG_NOTICE([dnstap: yes])],
+  [AC_MSG_NOTICE([dnstap: no])]
 )
 AC_MSG_NOTICE([Context library: $pdns_context_library])
 AC_MSG_NOTICE([])

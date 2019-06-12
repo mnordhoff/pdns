@@ -292,14 +292,16 @@ bool GSQLBackend::getDomainInfo(const DNSName &domain, DomainInfo &di, bool getS
   } catch (...) {
     return false;
   }
+  string type=d_result[0][5];
+  di.account=d_result[0][6];
+  di.kind = DomainInfo::stringToKind(type);
+
   vector<string> masters;
   stringtok(masters, d_result[0][2], " ,\t");
   for(const auto& m : masters)
     di.masters.emplace_back(m, 53);
   di.last_check=pdns_stou(d_result[0][3]);
   di.notified_serial = pdns_stou(d_result[0][4]);
-  string type=d_result[0][5];
-  di.account=d_result[0][6];
   di.backend=this;
 
   di.serial = 0;
@@ -315,8 +317,6 @@ bool GSQLBackend::getDomainInfo(const DNSName &domain, DomainInfo &di, bool getS
       g_log<<Logger::Error<<"Error retrieving serial for '"<<domain<<"': "<<ae.reason<<endl;
     }
   }
-
-  di.kind = DomainInfo::stringToKind(type);
 
   return true;
 }
@@ -339,25 +339,57 @@ void GSQLBackend::getUnfreshSlaveInfos(vector<DomainInfo> *unfreshDomains)
 
   vector<DomainInfo> allSlaves;
 
+  bool loggedAssertRowColumns = false;
   for(const auto& row : d_result) { // id,name,master,last_check
     DomainInfo sd;
-    ASSERT_ROW_COLUMNS("info-all-slaves-query", row, 4);
     try {
-      sd.id=pdns_stou(row[0]);
-      sd.zone= DNSName(row[1]);
-
-      vector<string> masters;
-      stringtok(masters, row[2], ", \t");
-      for(const auto& m : masters)
-        sd.masters.emplace_back(m, 53);
-
-      sd.last_check=pdns_stou(row[3]);
-      sd.backend=this;
-      sd.kind=DomainInfo::Slave;
-      allSlaves.push_back(sd);
-    } catch (...) {
+      ASSERT_ROW_COLUMNS("info-all-slaves-query", row, 4);
+    } catch(const PDNSException &e) {
+      if (!loggedAssertRowColumns) {
+        g_log<<Logger::Warning<<e.reason<<endl;
+      }
+      loggedAssertRowColumns = true;
       continue;
     }
+
+    try {
+      sd.zone = DNSName(row[1]);
+    } catch(const std::runtime_error &e) {
+      g_log<<Logger::Warning<<"Domain name '"<<row[1]<<"' is not a valid DNS name: "<<e.what()<<endl;
+      continue;
+    }
+
+    try {
+      sd.id=pdns_stou(row[0]);
+    } catch (const std::exception &e) {
+      g_log<<Logger::Warning<<"Could not convert id ("<<row[0]<<") for domain '"<<sd.zone<<"' into an integer: "<<e.what()<<endl;
+      continue;
+    }
+
+    vector<string> masters;
+    stringtok(masters, row[2], ", \t");
+    for(const auto& m : masters) {
+      try {
+        sd.masters.emplace_back(m, 53);
+      } catch(const PDNSException &e) {
+        g_log<<Logger::Warning<<"Could not parse master address ("<<m<<") for zone '"<<sd.zone<<"': "<<e.reason<<endl;
+      }
+    }
+    if (sd.masters.empty()) {
+      g_log<<Logger::Warning<<"No masters for slave zone '"<<sd.zone<<"' found in the database"<<endl;
+      continue;
+    }
+
+    try {
+      sd.last_check=pdns_stou(row[3]);
+    } catch (const std::exception &e) {
+      g_log<<Logger::Warning<<"Could not convert last_check ("<<row[3]<<") for domain '"<<sd.zone<<"' into an integer: "<<e.what()<<endl;
+      continue;
+    }
+
+    sd.backend=this;
+    sd.kind=DomainInfo::Slave;
+    allSlaves.push_back(sd);
   }
 
   for (auto& slave : allSlaves) {
@@ -385,7 +417,7 @@ void GSQLBackend::getUnfreshSlaveInfos(vector<DomainInfo> *unfreshDomains)
 void GSQLBackend::getUpdatedMasters(vector<DomainInfo> *updatedDomains)
 {
   /* list all domains that need notifications for which we are master, and insert into updatedDomains
-     id,name,master IP,serial */
+     id, name, notified_serial, serial */
   try {
     reconnectIfNeeded();
 
@@ -398,32 +430,33 @@ void GSQLBackend::getUpdatedMasters(vector<DomainInfo> *updatedDomains)
     throw PDNSException("GSQLBackend unable to retrieve list of master domains: "+e.txtReason());
   }
 
-  vector<DomainInfo> allMasters;
   size_t numanswers=d_result.size();
-  for(size_t n=0;n<numanswers;++n) { // id,name,master,last_check,notified_serial
-    DomainInfo sd;
-    ASSERT_ROW_COLUMNS("info-all-master-query", d_result[n], 6);
-    sd.id=pdns_stou(d_result[n][0]);
-    try {
-      sd.zone= DNSName(d_result[n][1]);
-    } catch (...) {
-      continue;
-    }
-    sd.last_check=pdns_stou(d_result[n][3]);
-    sd.notified_serial=pdns_stou(d_result[n][4]);
-    sd.backend=this;
-    sd.kind=DomainInfo::Master;
-    allMasters.push_back(sd);
-  }
+  vector<string>parts;
+  DomainInfo di;
 
-  for(vector<DomainInfo>::iterator i=allMasters.begin();i!=allMasters.end();++i) {
-    SOAData sdata;
-    sdata.serial=0;
-    sdata.refresh=0;
-    getSOA(i->zone,sdata);
-    if(i->notified_serial!=sdata.serial) {
-      i->serial=sdata.serial;
-      updatedDomains->push_back(*i);
+  di.backend = this;
+  di.kind = DomainInfo::Master;
+
+  for( size_t n = 0; n < numanswers; ++n ) { // id, name, notified_serial, content
+    ASSERT_ROW_COLUMNS( "info-all-master-query", d_result[n], 4 );
+
+    parts.clear();
+    stringtok( parts, d_result[n][3] );
+
+    try {
+      uint32_t serial = parts.size() > 2 ? pdns_stou(parts[2]) : 0;
+      uint32_t notified_serial = pdns_stou( d_result[n][2] );
+
+      if( serial != notified_serial ) {
+        di.id = pdns_stou( d_result[n][0] );
+        di.zone = DNSName( d_result[n][1] );
+        di.serial = serial;
+        di.notified_serial = notified_serial;
+
+        updatedDomains->emplace_back(di);
+      }
+    } catch ( ... ) {
+      continue;
     }
   }
 }
@@ -930,7 +963,7 @@ bool GSQLBackend::getAllDomainMetadata(const DNSName& name, std::map<std::string
       d_GetAllDomainMetadataQuery_stmt->nextRow(row);
       ASSERT_ROW_COLUMNS("get-all-domain-metadata-query", row, 2);
 
-      if (!isDnssecDomainMetadata(row[0]))
+      if (d_dnssecQueries || !isDnssecDomainMetadata(row[0]))
         meta[row[0]].push_back(row[1]);
     }
 
@@ -1265,28 +1298,41 @@ void GSQLBackend::getAllDomains(vector<DomainInfo> *domains, bool include_disabl
       } catch (...) {
         continue;
       }
+
+      if (pdns_iequals(row[3], "MASTER")) {
+        di.kind = DomainInfo::Master;
+      } else if (pdns_iequals(row[3], "SLAVE")) {
+        di.kind = DomainInfo::Slave;
+      } else if (pdns_iequals(row[3], "NATIVE")) {
+        di.kind = DomainInfo::Native;
+      } else {
+        g_log<<Logger::Warning<<"Could not parse domain kind '"<<row[3]<<"' as one of 'MASTER', 'SLAVE' or 'NATIVE'. Setting zone kind to 'NATIVE'"<<endl;
+        di.kind = DomainInfo::Native;
+      }
   
       if (!row[4].empty()) {
         vector<string> masters;
         stringtok(masters, row[4], " ,\t");
-        for(const auto& m : masters)
-          di.masters.emplace_back(m, 53);
+        for(const auto& m : masters) {
+          try {
+            di.masters.emplace_back(m, 53);
+          } catch(const PDNSException &e) {
+            g_log<<Logger::Warning<<"Could not parse master address ("<<m<<") for zone '"<<di.zone<<"': "<<e.reason;
+          }
+        }
       }
 
       SOAData sd;
       fillSOAData(row[2], sd);
       di.serial = sd.serial;
-      di.notified_serial = pdns_stou(row[5]);
-      di.last_check = pdns_stou(row[6]);
+      try {
+        di.notified_serial = pdns_stou(row[5]);
+        di.last_check = pdns_stou(row[6]);
+      } catch(...) {
+        continue;
+      }
       di.account = row[7];
 
-      if (pdns_iequals(row[3], "MASTER"))
-        di.kind = DomainInfo::Master;
-      else if (pdns_iequals(row[3], "SLAVE"))
-        di.kind = DomainInfo::Slave;
-      else
-        di.kind = DomainInfo::Native;
-  
       di.backend = this;
   
       domains->push_back(di);
@@ -1302,6 +1348,10 @@ bool GSQLBackend::replaceRRSet(uint32_t domain_id, const DNSName& qname, const Q
 {
   try {
     reconnectIfNeeded();
+
+    if (!d_inTransaction) {
+      throw PDNSException("replaceRRSet called outside of transaction");
+    }
 
     if (qt != QType::ANY) {
       d_DeleteRRSetQuery_stmt->
@@ -1449,6 +1499,9 @@ bool GSQLBackend::startTransaction(const DNSName &domain, int domain_id)
   try {
     reconnectIfNeeded();
 
+    if (inTransaction()) {
+      throw PDNSException("Attempted to start transaction while one was already active (domain '" + domain.toLogString() + "')");
+    }
     d_db->startTransaction();
     d_inTransaction = true;
     if(domain_id >= 0) {
@@ -1564,6 +1617,10 @@ bool GSQLBackend::replaceComments(const uint32_t domain_id, const DNSName& qname
 {
   try {
     reconnectIfNeeded();
+
+    if (!d_inTransaction) {
+      throw PDNSException("replaceComments called outside of transaction");
+    }
 
     d_DeleteCommentRRsetQuery_stmt->
       bind("domain_id",domain_id)->

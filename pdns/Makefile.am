@@ -223,6 +223,7 @@ pdns_server_SOURCES = \
 	tsigutils.hh tsigutils.cc \
 	tkey.cc \
 	ueberbackend.cc ueberbackend.hh \
+	uuid-utils.hh uuid-utils.cc \
 	unix_semaphore.cc \
 	unix_utility.cc \
 	utility.hh \
@@ -312,6 +313,7 @@ pdnsutil_SOURCES = \
 	ednsoptions.cc ednsoptions.hh \
 	ednssubnet.cc \
 	gss_context.cc gss_context.hh \
+	ipcipher.cc ipcipher.hh \
 	iputils.cc iputils.hh \
 	json.cc \
 	logger.cc \
@@ -349,7 +351,8 @@ pdnsutil_LDADD = \
 	$(JSON11_LIBS) \
 	$(LIBDL) \
 	$(BOOST_PROGRAM_OPTIONS_LIBS) \
-	$(LIBCRYPTO_LIBS)
+	$(LIBCRYPTO_LIBS) \
+	$(IPCRYPT_LIBS)
 
 if LIBSODIUM
 pdnsutil_SOURCES += sodiumsigners.cc
@@ -500,6 +503,11 @@ sdig_SOURCES = \
 sdig_LDADD = $(LIBCRYPTO_LIBS)
 sdig_LDFLAGS = $(AM_LDFLAGS) $(LIBCRYPTO_LDFLAGS)
 
+if HAVE_LIBCURL
+sdig_SOURCES += minicurl.cc minicurl.hh
+sdig_LDADD += $(LIBCURL)
+endif
+
 calidns_SOURCES = \
 	base32.cc \
 	base64.cc base64.hh \
@@ -640,6 +648,7 @@ ixfrdist_SOURCES = \
 	threadname.hh threadname.cc \
 	tsigverifier.cc tsigverifier.hh \
 	unix_utility.cc \
+	uuid-utils.hh uuid-utils.cc \
 	webserver.hh webserver.cc \
 	zoneparser-tng.cc
 
@@ -873,25 +882,30 @@ speedtest_SOURCES = \
 	sillyrecords.cc \
 	speedtest.cc \
 	statbag.cc \
-	unix_utility.cc
+	unix_utility.cc \
+	iputils.cc
 
 speedtest_LDFLAGS = $(AM_LDFLAGS) $(LIBCRYPTO_LDFLAGS)
 speedtest_LDADD = $(LIBCRYPTO_LIBS) \
 	$(RT_LIBS)
 
 dnswasher_SOURCES = \
+	base64.cc \
 	dnslabeltext.cc \
 	dnsname.hh dnsname.cc \
 	dnsparser.hh \
 	dnspcap.cc dnspcap.hh \
 	dnswasher.cc \
 	dnswriter.hh \
+	ipcipher.cc ipcipher.hh \
 	logger.cc \
 	misc.cc \
 	qtype.cc \
 	statbag.cc \
 	unix_utility.cc
 
+dnswasher_LDFLAGS = 	$(AM_LDFLAGS) $(BOOST_PROGRAM_OPTIONS_LDFLAGS) $(LIBCRYPTO_LDFLAGS)
+dnswasher_LDADD = 	$(BOOST_PROGRAM_OPTIONS_LIBS) $(LIBCRYPTO_LIBS) $(IPCRYPT_LIBS)
 
 dnsbulktest_SOURCES = \
 	base32.cc \
@@ -1272,6 +1286,7 @@ testrunner_SOURCES = \
 	ednssubnet.cc \
 	gettime.cc gettime.hh \
 	gss_context.cc gss_context.hh \
+	ipcipher.cc ipcipher.hh \
 	iputils.cc \
 	ixfr.cc ixfr.hh \
 	logger.cc \
@@ -1282,6 +1297,7 @@ testrunner_SOURCES = \
 	nameserver.cc \
 	nsecrecords.cc \
 	opensslsigners.cc opensslsigners.hh \
+	pollmplexer.cc \
 	qtype.cc \
 	rcpgenerator.cc \
 	responsestats.cc \
@@ -1301,11 +1317,13 @@ testrunner_SOURCES = \
 	test-dnsparser_cc.cc \
 	test-dnsparser_hh.cc \
 	test-dnsrecords_cc.cc \
+	test-ipcrypt_cc.cc \
 	test-iputils_hh.cc \
 	test-ixfr_cc.cc \
 	test-lock_hh.cc \
 	test-lua_auth4_cc.cc \
 	test-misc_hh.cc \
+	test-mplexer.cc \
 	test-nameserver_cc.cc \
 	test-packetcache_cc.cc \
 	test-packetcache_hh.cc \
@@ -1332,7 +1350,8 @@ testrunner_LDADD = \
 	$(BOOST_UNIT_TEST_FRAMEWORK_LIBS) \
 	$(RT_LIBS) \
 	$(LUA_LIBS) \
-	$(LIBDL)
+	$(LIBDL) \
+	$(IPCRYPT_LIBS)
 
 if PKCS11
 testrunner_SOURCES += pkcs11signers.cc pkcs11signers.hh
@@ -1347,6 +1366,25 @@ endif
 if LIBDECAF
 testrunner_SOURCES += decafsigners.cc
 testrunner_LDADD += $(LIBDECAF_LIBS)
+endif
+
+if HAVE_FREEBSD
+ixfrdist_SOURCES += kqueuemplexer.cc
+testrunner_SOURCES += kqueuemplexer.cc
+endif
+
+if HAVE_LINUX
+ixfrdist_SOURCES += epollmplexer.cc
+testrunner_SOURCES += epollmplexer.cc
+endif
+
+if HAVE_SOLARIS
+ixfrdist_SOURCES += \
+	devpollmplexer.cc \
+	portsmplexer.cc
+testrunner_SOURCES += \
+	devpollmplexer.cc \
+	portsmplexer.cc
 endif
 
 pdns_control_SOURCES = \
@@ -1436,6 +1474,7 @@ fuzz_target_packetcache_SOURCES = \
 	ednsoptions.cc ednsoptions.hh \
 	misc.cc misc.hh \
 	packetcache.hh \
+	qtype.cc qtype.hh \
 	statbag.cc statbag.hh
 
 fuzz_target_packetcache_DEPENDENCIES = $(fuzz_targets_deps)
@@ -1450,6 +1489,7 @@ fuzz_target_dnsdistcache_SOURCES = \
 	dnsname.cc dnsname.hh \
 	dnsparser.cc dnsparser.hh \
 	dnswriter.cc dnswriter.hh \
+	doh.hh \
 	ednsoptions.cc ednsoptions.hh \
 	ednssubnet.cc ednssubnet.hh \
 	iputils.cc iputils.hh \

@@ -52,7 +52,7 @@ DynListener *dl;
 CommunicatorClass Communicator;
 shared_ptr<UDPNameserver> N;
 int avg_latency;
-TCPNameserver *TN;
+unique_ptr<TCPNameserver> TN;
 static vector<DNSDistributor*> g_distributors;
 vector<std::shared_ptr<UDPNameserver> > g_udpReceivers;
 
@@ -117,7 +117,6 @@ void declareArguments()
   ::arg().set("queue-limit","Maximum number of milliseconds to queue a query")="1500"; 
   ::arg().set("resolver","Use this resolver for ALIAS and the internal stub resolver")="no";
   ::arg().set("udp-truncation-threshold", "Maximum UDP response size before we truncate")="1232";
-  ::arg().set("disable-tcp","Do not listen to TCP queries")="no";
   
   ::arg().set("config-name","Name of this virtual configuration - will rename the binary image")="";
 
@@ -137,7 +136,7 @@ void declareArguments()
   
   ::arg().setSwitch("slave","Act as a slave")="no";
   ::arg().setSwitch("master","Act as a master")="no";
-  ::arg().setSwitch("supermaster", "Act as a supermaster")="no";
+  ::arg().setSwitch("superslave", "Act as a superslave")="no";
   ::arg().setSwitch("disable-axfr-rectify","Disable the rectify step during an outgoing AXFR. Only required for regression testing.")="no";
   ::arg().setSwitch("guardian","Run within a guardian process")="no";
   ::arg().setSwitch("prevent-self-notification","Don't send notifications to what we think is ourself")="yes";
@@ -150,6 +149,7 @@ void declareArguments()
   ::arg().set("webserver-port","Port of webserver/API to listen on")="8081";
   ::arg().set("webserver-password","Password required for accessing the webserver")="";
   ::arg().set("webserver-allow-from","Webserver/API access is only allowed from these subnets")="127.0.0.1,::1";
+  ::arg().set("webserver-loglevel", "Amount of logging in the webserver (none, normal, detailed)") = "normal";
 
   ::arg().setSwitch("do-ipv6-additional-processing", "Do AAAA additional processing")="yes";
   ::arg().setSwitch("query-logging","Hint backends that queries should be logged")="no";
@@ -336,11 +336,11 @@ void declareStats(void)
   S.declare("latency","Average number of microseconds needed to answer a question", getLatency);
   S.declare("timedout-packets","Number of packets which weren't answered within timeout set");
   S.declare("security-status", "Security status based on regular polling");
-  S.declareRing("queries","UDP Queries Received");
-  S.declareRing("nxdomain-queries","Queries for non-existent records within existent domains");
-  S.declareRing("noerror-queries","Queries for existing records, but for type we don't have");
-  S.declareRing("servfail-queries","Queries that could not be answered due to backend errors");
-  S.declareRing("unauth-queries","Queries for domains that we are not authoritative for");
+  S.declareDNSNameQTypeRing("queries","UDP Queries Received");
+  S.declareDNSNameQTypeRing("nxdomain-queries","Queries for non-existent records within existent domains");
+  S.declareDNSNameQTypeRing("noerror-queries","Queries for existing records, but for type we don't have");
+  S.declareDNSNameQTypeRing("servfail-queries","Queries that could not be answered due to backend errors");
+  S.declareDNSNameQTypeRing("unauth-queries","Queries for domains that we are not authoritative for");
   S.declareRing("logmessages","Log Messages");
   S.declareComboRing("remotes","Remote server IP addresses");
   S.declareComboRing("remotes-unauth","Remote hosts querying domains for which we are not auth");
@@ -422,7 +422,7 @@ try
      if(P->d.qr)
        continue;
 
-    S.ringAccount("queries", P->qdomain.toLogString()+"/"+P->qtype.getName());
+    S.ringAccount("queries", P->qdomain, P->qtype);
     S.ringAccount("remotes",P->d_remote);
     if(logDNSQueries) {
       string remote;
@@ -510,6 +510,7 @@ void mainthread()
    g_8bitDNS = ::arg().mustDo("8bit-dns");
 #ifdef HAVE_LUA_RECORDS
    g_doLuaRecord = ::arg().mustDo("enable-lua-records");
+   g_LuaRecordSharedState = (::arg()["enable-lua-records"] == "shared");
    g_luaRecordExecLimit = ::arg().asNum("lua-records-exec-limit");
 #endif
 
@@ -606,8 +607,7 @@ void mainthread()
   if(::arg().mustDo("slave") || ::arg().mustDo("master") || !::arg()["forward-notify"].empty())
     Communicator.go(); 
 
-  if(TN)
-    TN->go(); // tcp nameserver launch
+  TN->go(); // tcp nameserver launch
 
   //  fork(); (this worked :-))
   unsigned int max_rthreads= ::arg().asNum("receiver-threads", 1);
