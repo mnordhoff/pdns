@@ -2,6 +2,9 @@
 name: 'Test package building for specific distributions'
 
 on:
+  push:
+    branches:
+      - 'rec-refresh-qm-ns-interaction'
   schedule:
     - cron: '0 1 * * *'
 
@@ -12,14 +15,9 @@ jobs:
     runs-on: ubuntu-20.04
     strategy:
       matrix:
-        product: ['authoritative', 'recursor', 'dnsdist']
+        product: ['recursor']
         os:
-          - centos-7
-          - ubuntu-bionic
-          - el-8
-          - centos-8-stream
-          - debian-bullseye
-          - ubuntu-jammy
+          - ubuntu-focal
       fail-fast: false
     steps:
       - uses: actions/checkout@v2.3.4
